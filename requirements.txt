@@ -2,9 +2,7 @@ flask
 flask-cors
 gunicorn
 langchain
-langchain-core
 langchain-community
 langchain-google-genai
-langchain-text-splitters
 faiss-cpu
 pypdf
