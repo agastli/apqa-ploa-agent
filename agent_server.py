@@ -6,11 +6,16 @@ from google import genai
 from google.genai import types
 
 # --- CONFIGURATION ---
-API_KEY = "AIzaSyCms2tGXckFItuCtmNZTp8wshZJyAmN2b8"
+# 1. Try to get key from Render Environment, otherwise use your hardcoded key
+# (This allows it to work on Render securely AND on your laptop)
+API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyCms2tGXckFItuCtmNZTp8wshZJyAmN2b8")
 KNOWLEDGE_FOLDER = "knowledge"
 
 app = Flask(__name__)
-CORS(app)
+
+# --- THE CONNECTION FIX (CORS) ---
+# This specific configuration allows Hostinger (and everyone else) to talk to Render
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # --- GLOBAL VARIABLES ---
 client = genai.Client(api_key=API_KEY)
@@ -35,10 +40,9 @@ def setup_agent():
     
     knowledge_base_parts = []
     
-    # 1. SMART UPLOAD: Check cloud first
+    # 1. SMART UPLOAD: Check cloud first (KEEPING THIS FOR SPEED)
     if os.path.exists(KNOWLEDGE_FOLDER):
         local_files = os.listdir(KNOWLEDGE_FOLDER)
-        # Get list of what is already on Google
         cloud_files = get_existing_files() 
         
         print(f"Scanning {len(local_files)} local files...")
@@ -53,7 +57,6 @@ def setup_agent():
                 print(f"⚡ Found '{filename}' in cloud. Skipping upload.")
                 uploaded_file = cloud_files[filename]
                 
-                # Quick check to ensure it's active
                 if uploaded_file.state.name != "ACTIVE":
                     print(f"   (File is {uploaded_file.state.name}, waiting...)")
                     while uploaded_file.state.name == "PROCESSING":
@@ -78,7 +81,6 @@ def setup_agent():
                     print(f"Error uploading {filename}: {e}")
                     continue
 
-            # Add to knowledge base
             knowledge_base_parts.append(
                 types.Part.from_uri(
                     file_uri=uploaded_file.uri,
@@ -94,9 +96,9 @@ def setup_agent():
         types.Part.from_text(text="Use these uploaded documents to answer questions.")
     )
 
-    # 3. Create Session (Using the fast 1.5-flash model)
+    # 3. Create Session
     chat_session = client.chats.create(
-        model="gemini-flash-latest", 
+        model="gemini-1.5-flash", 
         
         config=types.GenerateContentConfig(
             system_instruction=[
@@ -118,10 +120,17 @@ def setup_agent():
             types.Content(role="model", parts=[types.Part.from_text(text="Ready.")])
         ]
     )
-    print("--- Agent Ready on Port 5000 ---")
+    print("--- Agent Ready ---")
 
-# Initialize agent on startup
-setup_agent()
+# Initialize on startup (with error handling)
+try:
+    setup_agent()
+except Exception as e:
+    print(f"Failed to init agent: {e}")
+
+@app.route('/')
+def home():
+    return "APQA Agent is Live!"
 
 @app.route('/chat', methods=['POST'])
 def chat_endpoint():
@@ -139,4 +148,5 @@ def chat_endpoint():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(port=5000, debug=False)
+    # Render requires listening on 0.0.0.0
+    app.run(host='0.0.0.0', port=10000)
