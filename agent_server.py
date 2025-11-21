@@ -2,22 +2,20 @@ import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-from langchain.prompts import PromptTemplate
+# ✅ FIX: Import from langchain_core
+from langchain_core.prompts import PromptTemplate
 from langchain.chains import RetrievalQA
 from langchain_community.vectorstores import FAISS
 
 # --- CONFIGURATION ---
-# Render has the key saved as GEMINI_API_KEY
 API_KEY = os.environ.get("GEMINI_API_KEY")
 
 if not API_KEY:
     print("CRITICAL ERROR: GEMINI_API_KEY not found in Environment!")
 else:
-    # LangChain specifically needs "GOOGLE_API_KEY" to be set
     os.environ["GOOGLE_API_KEY"] = API_KEY
 
 app = Flask(__name__)
-# Allow Hostinger to talk to Render
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 # --- GLOBAL VARIABLES ---
@@ -28,18 +26,21 @@ def setup_agent():
     print("--- Loading Vector Index ---")
     
     try:
-        # 1. Load the pre-built index from the folder you uploaded
-        # We use the same model for reading as we did for building
+        # 1. Load the pre-built index
         embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
         
-        # "allow_dangerous_deserialization" is required for loading local files
+        # Load from the uploaded folder
+        if not os.path.exists("faiss_index"):
+             print("⚠️ Error: 'faiss_index' folder not found on server!")
+             return
+
         vector_store = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
         print("✅ Vector Index Loaded Successfully")
 
-        # 2. Setup the Gemini Model
+        # 2. Setup Gemini
         llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.3)
 
-        # 3. Create the Prompt Template
+        # 3. Create Prompt
         template = """
         You are an expert APQA Assistant for Qatar University.
         Use the following context to answer the question.
@@ -48,8 +49,7 @@ def setup_agent():
         - Provide a clear, synthesized answer.
         - Use bold headers and bullet points.
         - If the answer is not in the context, say "I couldn't find that in the documents."
-        - Do NOT use citation tags like .
-
+        
         Context: {context}
 
         Question: {question}
@@ -58,11 +58,11 @@ def setup_agent():
         """
         prompt = PromptTemplate(template=template, input_variables=["context", "question"])
 
-        # 4. Create the Chain
+        # 4. Create Chain
         qa_chain = RetrievalQA.from_chain_type(
             llm=llm,
             chain_type="stuff",
-            retriever=vector_store.as_retriever(search_kwargs={"k": 5}), # Find top 5 matches
+            retriever=vector_store.as_retriever(search_kwargs={"k": 5}),
             chain_type_kwargs={"prompt": prompt}
         )
         print("--- Agent Ready ---")
@@ -70,7 +70,7 @@ def setup_agent():
     except Exception as e:
         print(f"CRITICAL ERROR loading index: {e}")
 
-# Initialize on startup
+# Initialize
 setup_agent()
 
 @app.route('/')
@@ -84,12 +84,10 @@ def chat_endpoint():
     if not user_message: return jsonify({"error": "No message"}), 400
     
     if not qa_chain:
-        return jsonify({"error": "Agent is still starting..."}), 503
+        return jsonify({"error": "Agent is starting or failed to load index."}), 503
 
     try:
-        # Run the chain
         response = qa_chain.invoke(user_message)
-        # LangChain returns the answer in the 'result' key
         return jsonify({"reply": response['result']})
     except Exception as e:
         print(f"Error: {e}")
