@@ -8,7 +8,11 @@ from google.genai import types
 # --- CONFIGURATION ---
 # 1. Try to get key from Render Environment, otherwise use your hardcoded key
 # (This allows it to work on Render securely AND on your laptop)
-API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyCms2tGXckFItuCtmNZTp8wshZJyAmN2b8")
+# ✅ SECURE WAY: Only look for the key in the environment variables.
+# Do NOT paste the actual key starting with "AIza..." here.
+API_KEY = os.environ.get("GEMINI_API_KEY")
+if not API_KEY:
+    print("⚠️ Error: GEMINI_API_KEY not found in environment variables!")
 KNOWLEDGE_FOLDER = "knowledge"
 
 app = Flask(__name__)
