@@ -2,80 +2,70 @@ import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-# ✅ FIX: Import from langchain_core
-from langchain_core.prompts import PromptTemplate
-from langchain.chains import RetrievalQA
+# ✅ MODERN IMPORTS (Fixes "No module named langchain.chains" error)
+from langchain_core.prompts import ChatPromptTemplate
+from langchain.chains import create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_community.vectorstores import FAISS
 
 # --- CONFIGURATION ---
 API_KEY = os.environ.get("GEMINI_API_KEY")
-
-if not API_KEY:
-    print("CRITICAL ERROR: GEMINI_API_KEY not found in Environment!")
-else:
+if API_KEY:
     os.environ["GOOGLE_API_KEY"] = API_KEY
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 # --- GLOBAL VARIABLES ---
-qa_chain = None
+rag_chain = None
 
 def setup_agent():
-    global qa_chain
+    global rag_chain
     print("--- Loading Vector Index ---")
     
     try:
-        # 1. Load the pre-built index
+        # 1. Load Index
         embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
         
-        # Load from the uploaded folder
         if not os.path.exists("faiss_index"):
-             print("⚠️ Error: 'faiss_index' folder not found on server!")
+             print("⚠️ Error: 'faiss_index' folder not found!")
              return
 
         vector_store = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
-        print("✅ Vector Index Loaded Successfully")
+        retriever = vector_store.as_retriever(search_kwargs={"k": 5})
+        print("✅ Vector Index Loaded")
 
-        # 2. Setup Gemini
-        llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.3)
+        # 2. Setup Gemini (Using the latest model)
+        llm = ChatGoogleGenerativeAI(model="gemini-flash-latest", temperature=0.3)
 
-        # 3. Create Prompt
-        template = """
-        You are an expert APQA Assistant for Qatar University.
-        Use the following context to answer the question.
-        
-        GUIDELINES:
-        - Provide a clear, synthesized answer.
-        - Use bold headers and bullet points.
-        - If the answer is not in the context, say "I couldn't find that in the documents."
-        
-        Context: {context}
-
-        Question: {question}
-        
-        Answer:
-        """
-        prompt = PromptTemplate(template=template, input_variables=["context", "question"])
-
-        # 4. Create Chain
-        qa_chain = RetrievalQA.from_chain_type(
-            llm=llm,
-            chain_type="stuff",
-            retriever=vector_store.as_retriever(search_kwargs={"k": 5}),
-            chain_type_kwargs={"prompt": prompt}
+        # 3. Create Modern Prompt
+        system_prompt = (
+            "You are an expert APQA Assistant for Qatar University. "
+            "Use the following context to answer the question. "
+            "If the answer is not in the context, say 'I couldn't find that in the documents.' "
+            "Do NOT use citation tags."
+            "\n\n"
+            "{context}"
         )
+        
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", system_prompt),
+            ("human", "{input}"),
+        ])
+
+        # 4. Create Modern Chain
+        question_answer_chain = create_stuff_documents_chain(llm, prompt)
+        rag_chain = create_retrieval_chain(retriever, question_answer_chain)
         print("--- Agent Ready ---")
 
     except Exception as e:
-        print(f"CRITICAL ERROR loading index: {e}")
+        print(f"CRITICAL ERROR: {e}")
 
-# Initialize
 setup_agent()
 
 @app.route('/')
 def home():
-    return "APQA Agent (RAG Version) is Live!"
+    return "APQA Agent is Live!"
 
 @app.route('/chat', methods=['POST'])
 def chat_endpoint():
@@ -83,12 +73,13 @@ def chat_endpoint():
     user_message = data.get('message')
     if not user_message: return jsonify({"error": "No message"}), 400
     
-    if not qa_chain:
-        return jsonify({"error": "Agent is starting or failed to load index."}), 503
+    if not rag_chain:
+        return jsonify({"error": "Agent is starting..."}), 503
 
     try:
-        response = qa_chain.invoke(user_message)
-        return jsonify({"reply": response['result']})
+        # Modern chains expect 'input'
+        response = rag_chain.invoke({"input": user_message})
+        return jsonify({"reply": response['answer']})
     except Exception as e:
         print(f"Error: {e}")
         return jsonify({"error": str(e)}), 500
