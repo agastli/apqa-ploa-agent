@@ -1,156 +1,99 @@
 import os
-import time
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from google import genai
-from google.genai import types
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain.prompts import PromptTemplate
+from langchain.chains import RetrievalQA
+from langchain_community.vectorstores import FAISS
 
 # --- CONFIGURATION ---
-# 1. Try to get key from Render Environment, otherwise use your hardcoded key
-# (This allows it to work on Render securely AND on your laptop)
-# ✅ SECURE WAY: Only look for the key in the environment variables.
-# Do NOT paste the actual key starting with "AIza..." here.
+# Render has the key saved as GEMINI_API_KEY
 API_KEY = os.environ.get("GEMINI_API_KEY")
+
 if not API_KEY:
-    print("⚠️ Error: GEMINI_API_KEY not found in environment variables!")
-KNOWLEDGE_FOLDER = "knowledge"
+    print("CRITICAL ERROR: GEMINI_API_KEY not found in Environment!")
+else:
+    # LangChain specifically needs "GOOGLE_API_KEY" to be set
+    os.environ["GOOGLE_API_KEY"] = API_KEY
 
 app = Flask(__name__)
-
-# --- THE CONNECTION FIX (CORS) ---
-# This specific configuration allows Hostinger (and everyone else) to talk to Render
+# Allow Hostinger to talk to Render
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 # --- GLOBAL VARIABLES ---
-client = genai.Client(api_key=API_KEY)
-chat_session = None
-
-def get_existing_files():
-    """Creates a dictionary of files already uploaded to Google."""
-    print("Checking for existing files on Google Cloud...")
-    existing = {}
-    try:
-        # List files currently stored in your project
-        for f in client.files.list():
-            if f.display_name:
-                existing[f.display_name] = f
-    except Exception as e:
-        print(f"Warning: Could not list existing files: {e}")
-    return existing
+qa_chain = None
 
 def setup_agent():
-    global chat_session
-    print("--- Initializing Agent ---")
+    global qa_chain
+    print("--- Loading Vector Index ---")
     
-    knowledge_base_parts = []
-    
-    # 1. SMART UPLOAD: Check cloud first (KEEPING THIS FOR SPEED)
-    if os.path.exists(KNOWLEDGE_FOLDER):
-        local_files = os.listdir(KNOWLEDGE_FOLDER)
-        cloud_files = get_existing_files() 
+    try:
+        # 1. Load the pre-built index from the folder you uploaded
+        # We use the same model for reading as we did for building
+        embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
         
-        print(f"Scanning {len(local_files)} local files...")
+        # "allow_dangerous_deserialization" is required for loading local files
+        vector_store = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
+        print("✅ Vector Index Loaded Successfully")
+
+        # 2. Setup the Gemini Model
+        llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.3)
+
+        # 3. Create the Prompt Template
+        template = """
+        You are an expert APQA Assistant for Qatar University.
+        Use the following context to answer the question.
         
-        for filename in local_files:
-            if not filename.lower().endswith(".pdf"): continue
-            
-            path = os.path.join(KNOWLEDGE_FOLDER, filename)
-            
-            # --- THE SPEED FIX ---
-            if filename in cloud_files:
-                print(f"⚡ Found '{filename}' in cloud. Skipping upload.")
-                uploaded_file = cloud_files[filename]
-                
-                if uploaded_file.state.name != "ACTIVE":
-                    print(f"   (File is {uploaded_file.state.name}, waiting...)")
-                    while uploaded_file.state.name == "PROCESSING":
-                        time.sleep(1)
-                        uploaded_file = client.files.get(name=uploaded_file.name)
-            else:
-                # Only upload if it's NOT in the cloud
-                try:
-                    print(f"⬆️  Uploading '{filename}'...", end=" ")
-                    uploaded_file = client.files.upload(file=path, config={'display_name': filename})
-                    
-                    while uploaded_file.state.name == "PROCESSING":
-                        time.sleep(1)
-                        uploaded_file = client.files.get(name=uploaded_file.name)
-                    
-                    if uploaded_file.state.name == "ACTIVE":
-                        print("✅ Done.")
-                    else:
-                        print("❌ Failed.")
-                        continue
-                except Exception as e:
-                    print(f"Error uploading {filename}: {e}")
-                    continue
+        GUIDELINES:
+        - Provide a clear, synthesized answer.
+        - Use bold headers and bullet points.
+        - If the answer is not in the context, say "I couldn't find that in the documents."
+        - Do NOT use citation tags like .
 
-            knowledge_base_parts.append(
-                types.Part.from_uri(
-                    file_uri=uploaded_file.uri,
-                    mime_type=uploaded_file.mime_type
-                )
-            )
+        Context: {context}
 
-    # 2. Configure Chat
-    print("Configuring chat session...")
-    tools = [types.Tool(google_search=types.GoogleSearch())]
-    
-    knowledge_base_parts.append(
-        types.Part.from_text(text="Use these uploaded documents to answer questions.")
-    )
-
-    # 3. Create Session
-    chat_session = client.chats.create(
-        model="gemini-flash-latest", 
+        Question: {question}
         
-        config=types.GenerateContentConfig(
-            system_instruction=[
-                types.Part.from_text(text="""
-                You are an expert APQA Assistant for Qatar University.
-                YOUR GOAL: Provide clear, synthesized answers.
-                STRICT GUIDELINES:
-                1. SYNTHESIZE: Combine info into a summary.
-                2. NO CITATION TAGS: Do NOT use.
-                3. FORMATTING: Use bold headers and bullet points.
-                4. SCOPE: Use files first, then Google Search.
-                """),
-            ],
-            tools=tools,
-            response_mime_type="text/plain",
-        ),
-        history=[
-            types.Content(role="user", parts=knowledge_base_parts),
-            types.Content(role="model", parts=[types.Part.from_text(text="Ready.")])
-        ]
-    )
-    print("--- Agent Ready ---")
+        Answer:
+        """
+        prompt = PromptTemplate(template=template, input_variables=["context", "question"])
 
-# Initialize on startup (with error handling)
-try:
-    setup_agent()
-except Exception as e:
-    print(f"Failed to init agent: {e}")
+        # 4. Create the Chain
+        qa_chain = RetrievalQA.from_chain_type(
+            llm=llm,
+            chain_type="stuff",
+            retriever=vector_store.as_retriever(search_kwargs={"k": 5}), # Find top 5 matches
+            chain_type_kwargs={"prompt": prompt}
+        )
+        print("--- Agent Ready ---")
+
+    except Exception as e:
+        print(f"CRITICAL ERROR loading index: {e}")
+
+# Initialize on startup
+setup_agent()
 
 @app.route('/')
 def home():
-    return "APQA Agent is Live!"
+    return "APQA Agent (RAG Version) is Live!"
 
 @app.route('/chat', methods=['POST'])
 def chat_endpoint():
     data = request.json
     user_message = data.get('message')
+    if not user_message: return jsonify({"error": "No message"}), 400
     
-    if not user_message:
-        return jsonify({"error": "No message provided"}), 400
+    if not qa_chain:
+        return jsonify({"error": "Agent is still starting..."}), 503
 
     try:
-        response = chat_session.send_message(user_message)
-        return jsonify({"reply": response.text})
+        # Run the chain
+        response = qa_chain.invoke(user_message)
+        # LangChain returns the answer in the 'result' key
+        return jsonify({"reply": response['result']})
     except Exception as e:
-        print(f"ERROR: {e}")
+        print(f"Error: {e}")
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    # Render requires listening on 0.0.0.0
     app.run(host='0.0.0.0', port=10000)

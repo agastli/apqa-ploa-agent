@@ -1,4 +1,9 @@
 flask
 flask-cors
-google-genai
 gunicorn
+langchain
+langchain-google-genai
+langchain-community
+langchain-text-splitters
+faiss-cpu
+pypdf
