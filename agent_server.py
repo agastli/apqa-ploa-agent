@@ -2,9 +2,9 @@ import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-# ✅ MODERN IMPORTS (Fixes "No module named langchain.chains" error)
 from langchain_core.prompts import ChatPromptTemplate
-from langchain.chains import create_retrieval_chain
+# ✅ FIXED IMPORTS
+from langchain.chains.retrieval import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_community.vectorstores import FAISS
 
@@ -35,10 +35,10 @@ def setup_agent():
         retriever = vector_store.as_retriever(search_kwargs={"k": 5})
         print("✅ Vector Index Loaded")
 
-        # 2. Setup Gemini (Using the latest model)
+        # 2. Setup Gemini
         llm = ChatGoogleGenerativeAI(model="gemini-flash-latest", temperature=0.3)
 
-        # 3. Create Modern Prompt
+        # 3. Create Prompt
         system_prompt = (
             "You are an expert APQA Assistant for Qatar University. "
             "Use the following context to answer the question. "
@@ -53,7 +53,7 @@ def setup_agent():
             ("human", "{input}"),
         ])
 
-        # 4. Create Modern Chain
+        # 4. Create Chain
         question_answer_chain = create_stuff_documents_chain(llm, prompt)
         rag_chain = create_retrieval_chain(retriever, question_answer_chain)
         print("--- Agent Ready ---")
@@ -77,7 +77,6 @@ def chat_endpoint():
         return jsonify({"error": "Agent is starting..."}), 503
 
     try:
-        # Modern chains expect 'input'
         response = rag_chain.invoke({"input": user_message})
         return jsonify({"reply": response['answer']})
     except Exception as e:
