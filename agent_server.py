@@ -102,7 +102,7 @@ def setup_agent():
 
     # 3. Create Session
     chat_session = client.chats.create(
-        model="gemini-1.5-flash", 
+        model="gemini-flash-lates",
         
         config=types.GenerateContentConfig(
             system_instruction=[
