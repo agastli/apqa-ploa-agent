@@ -3,10 +3,11 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
-# ✅ FIXED IMPORTS
-from langchain.chains.retrieval import create_retrieval_chain
+# ✅ STANDARD IMPORTS (Safe)
+from langchain.chains import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_community.vectorstores import FAISS
+
 
 # --- CONFIGURATION ---
 API_KEY = os.environ.get("GEMINI_API_KEY")
