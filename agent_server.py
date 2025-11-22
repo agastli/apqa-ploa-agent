@@ -8,7 +8,7 @@ from langchain_google_genai import (
     ChatGoogleGenerativeAI,
     GoogleGenerativeAIEmbeddings,
 )
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_classic.chains import create_retrieval_chain
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_community.vectorstores import FAISS
@@ -42,7 +42,7 @@ def get_session_history(session_id: str) -> InMemoryChatMessageHistory:
 
 
 def setup_agent() -> None:
-    """Load FAISS index and build the RAG chain with conversation memory."""
+    """Load FAISS index and build the RAG chain with conversation memory and language control."""
     global rag_chain, conversational_rag
     print("--- Loading Vector Index ---")
 
@@ -72,11 +72,16 @@ def setup_agent() -> None:
             max_output_tokens=1200,
         )
 
-        # --- System prompt with history support ---
+        # --- System prompt with history + language support ---
         system_prompt = (
             "You represent Qatar University's Office of Academic Planning & Quality Assurance (APQA). "
             "Answer questions the way a knowledgeable APQA staff member would respond to faculty or programs. "
             "Use clear, professional, and friendly language. Do not sound robotic.\n\n"
+            "LANGUAGE CONTROL\n"
+            "- You receive a parameter called 'language'.\n"
+            "- If language == 'ar', answer fully in Modern Standard Arabic.\n"
+            "- If language == 'en', answer fully in English.\n"
+            "- Do not mix languages unless the user explicitly asks you to.\n\n"
             "STYLE AND TONE\n"
             "- Speak directly, as if you are part of APQA (e.g., \"Currently, the OAS supports...\").\n"
             "- Do NOT mention words like \"context\", \"documents\", \"manuals\", or \"PDF\" in your answer.\n"
@@ -105,17 +110,17 @@ def setup_agent() -> None:
             "{context}"
         )
 
-        # IMPORTANT: include {history} so previous turns are visible to the model
-        from langchain_core.prompts import MessagesPlaceholder
-
         prompt = ChatPromptTemplate.from_messages(
             [
                 ("system", system_prompt),
                 MessagesPlaceholder(variable_name="history"),
-                ("human", "{input}"),
+                (
+                    "human",
+                    "Language: {language}\n\n"
+                    "User question: {input}"
+                ),
             ]
         )
-
 
         qa_chain = create_stuff_documents_chain(llm, prompt)
         rag_chain = create_retrieval_chain(retriever, qa_chain)
@@ -149,6 +154,7 @@ def chat_endpoint():
     global conversational_rag
     data = request.json or {}
     user_message = data.get("message")
+    language = data.get("language", "en")
 
     if not user_message:
         return jsonify({"error": "No message"}), 400
@@ -163,7 +169,10 @@ def chat_endpoint():
 
     try:
         response = conversational_rag.invoke(
-            {"input": user_message},
+            {
+                "input": user_message,
+                "language": language,
+            },
             config={"configurable": {"session_id": session_id}},
         )
         return jsonify({"reply": response.get("answer", "")})
