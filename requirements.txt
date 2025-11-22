@@ -6,6 +6,7 @@ langchain-community
 langchain-core
 langchain-google-genai
 langchain-text-splitters
+langchain-classic
 faiss-cpu
 pypdf
 pydantic

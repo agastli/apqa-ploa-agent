@@ -3,15 +3,16 @@ import logging
 from dataclasses import dataclass
 from typing import Dict, Any, List
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
 
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_community.vectorstores import FAISS
 
 from langchain_core.prompts import ChatPromptTemplate
-from langchain.chains import create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
+# ✅ FIX: Import from langchain_classic instead of langchain.chains
+from langchain_classic.chains import create_retrieval_chain
+from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 
 # --- LOGGING SETUP ---
 logging.basicConfig(level=logging.INFO)
@@ -21,13 +22,13 @@ logger = logging.getLogger(__name__)
 # Configuration & basic checks
 # -------------------------------------------------------------------
 
-# ✅ Use ONLY GOOGLE_API_KEY everywhere (same as test_gemini.py)
+# ✅ Use GOOGLE_API_KEY from environment variables
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 
 if not GOOGLE_API_KEY:
     logger.error("GOOGLE_API_KEY is missing! Please set it in Render env vars.")
 else:
-    logger.info(f"GOOGLE_API_KEY detected (prefix): {GOOGLE_API_KEY[:8]}*****")
+    logger.info(f"API Key detected (prefix): {GOOGLE_API_KEY[:8]}*****")
 
 INDEX_DIR = os.environ.get("INDEX_DIR", "faiss_index")
 logger.info(f"Using INDEX_DIR = {INDEX_DIR}")
@@ -85,8 +86,8 @@ def get_system_prompt(language: str) -> str:
         )
     elif language == "fr":
         return (
-            "Vous êtes l’assistant du Bureau APQA de l’Université du Qatar.\n"
-            "Appuyez-vous d’abord sur les documents fournis.\n"
+            "Vous êtes l'assistant du Bureau APQA de l'Université du Qatar.\n"
+            "Appuyez-vous d'abord sur les documents fournis.\n"
             "Contexte:\n{context}\n\n"
             "Historique:\n{chat_history}\n\n"
             "Question:\n{input}"
@@ -148,20 +149,22 @@ rag_chain_fr = build_rag_chain(RagConfig(language="fr"))
 # Flask app
 # -------------------------------------------------------------------
 
-app = Flask(__name__, static_folder=".", static_url_path="")
+app = Flask(__name__, template_folder="templates", static_folder="static")
+# In production, you should restrict this to your frontend's domain
+# For example: CORS(app, origins=["https://your-frontend-domain.com"])
 CORS(app)
 
 chat_history: List[str] = []
 
 @app.route("/")
 def index():
-    return app.send_static_file("index.html")
+    return render_template("index.html")
 
 @app.route("/chat", methods=["POST"])
 def chat_endpoint():
     try:
         data = request.get_json(force=True) or {}
-        message = (data.get("message") or "").trim() if hasattr(str, "trim") else (data.get("message") or "").strip()
+        message = (data.get("message") or "").strip()
         language = (data.get("language") or "en").lower()
 
         if not message:
