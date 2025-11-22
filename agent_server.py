@@ -2,7 +2,6 @@ import os
 import logging
 from dataclasses import dataclass
 from typing import Dict, Any, List
-from operator import itemgetter
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -11,10 +10,6 @@ from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmb
 from langchain_community.vectorstores import FAISS
 
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnableParallel, RunnablePassthrough
-from langchain_core.output_parsers import StrOutputParser
-
-# ✅ STANDARD IMPORTS (Matches your requirements.txt)
 from langchain.chains import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 
@@ -26,15 +21,16 @@ logger = logging.getLogger(__name__)
 # Configuration & basic checks
 # -------------------------------------------------------------------
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
-    logger.error("GEMINI_API_KEY is missing!")
-    # raise RuntimeError("Please set GEMINI_API_KEY")
+# ✅ Use ONLY GOOGLE_API_KEY everywhere (same as test_gemini.py)
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
+
+if not GOOGLE_API_KEY:
+    logger.error("GOOGLE_API_KEY is missing! Please set it in Render env vars.")
+else:
+    logger.info(f"GOOGLE_API_KEY detected (prefix): {GOOGLE_API_KEY[:8]}*****")
 
 INDEX_DIR = os.environ.get("INDEX_DIR", "faiss_index")
-
-if GEMINI_API_KEY:
-    os.environ["GOOGLE_API_KEY"] = GEMINI_API_KEY
+logger.info(f"Using INDEX_DIR = {INDEX_DIR}")
 
 @dataclass
 class RagConfig:
@@ -46,9 +42,9 @@ class RagConfig:
 
 def load_vector_index():
     """Load the FAISS index built by build_index.py."""
-    logger.info(f"Loading index from {INDEX_DIR}...")
-    
-    # ✅ FIX: Must match build_index.py (text-embedding-004)
+    logger.info(f"Loading FAISS index from '{INDEX_DIR}' ...")
+
+    # Must match build_index.py
     embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
 
     if not os.path.isdir(INDEX_DIR):
@@ -62,10 +58,10 @@ def load_vector_index():
             index_name="index",
             allow_dangerous_deserialization=True,
         )
-        logger.info("✅ Index loaded successfully.")
+        logger.info("✅ FAISS index loaded successfully.")
         return index
     except Exception as e:
-        logger.critical(f"Failed to load index: {e}")
+        logger.critical(f"❌ Failed to load FAISS index: {e}", exc_info=True)
         return None
 
 vector_index = load_vector_index()
@@ -105,11 +101,19 @@ def get_system_prompt(language: str) -> str:
         )
 
 # -------------------------------------------------------------------
-# Build RAG chain (Modern LCEL)
+# Build RAG chain
 # -------------------------------------------------------------------
 
 def build_rag_chain(config: RagConfig):
-    # ✅ FIX: Using gemini-flash-latest
+    if not retriever:
+        logger.error("Retriever is not available; RAG chain cannot be built.")
+        return None
+
+    if not GOOGLE_API_KEY:
+        logger.error("GOOGLE_API_KEY missing; cannot build LLM.")
+        return None
+
+    # ✅ Use the model you requested
     llm = ChatGoogleGenerativeAI(
         model="gemini-flash-latest",
         temperature=0.2,
@@ -117,28 +121,23 @@ def build_rag_chain(config: RagConfig):
     )
 
     system_prompt_text = get_system_prompt(config.language)
-    
-    # Modern ChatPromptTemplate
+
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt_text),
         ("human", "{input}"),
     ])
 
-    if not retriever:
-        return None
-
-    # ✅ MODERN CHAIN CONSTRUCTION
     question_answer_chain = create_stuff_documents_chain(llm, prompt)
-    rag_chain = create_retrieval_chain(retriever, question_answer_chain)
+    rag = create_retrieval_chain(retriever, question_answer_chain)
 
-    # Wrapper to handle chat history string formatting
     def chain(inputs: Dict[str, Any]) -> str:
-        response = rag_chain.invoke({
+        response = rag.invoke({
             "input": inputs["input"],
-            "chat_history": inputs.get("chat_history", [])
+            "chat_history": inputs.get("chat_history", []),
         })
-        return response['answer']
+        return response["answer"]
 
+    logger.info(f"RAG chain built for language = {config.language}")
     return chain
 
 rag_chain_en = build_rag_chain(RagConfig(language="en"))
@@ -155,22 +154,20 @@ CORS(app)
 chat_history: List[str] = []
 
 @app.route("/")
-def index() -> Any:
+def index():
     return app.send_static_file("index.html")
 
 @app.route("/chat", methods=["POST"])
 def chat_endpoint():
     try:
-        data = request.get_json(force=True)
-        message = (data.get("message") or "").strip()
+        data = request.get_json(force=True) or {}
+        message = (data.get("message") or "").trim() if hasattr(str, "trim") else (data.get("message") or "").strip()
         language = (data.get("language") or "en").lower()
 
         if not message:
             return jsonify({"error": "Message is required"}), 400
 
-        if not rag_chain_en:
-             return jsonify({"reply": "System is starting up or index failed to load. Please check server logs."}), 503
-
+        # Choose the chain
         if language == "ar":
             chain = rag_chain_ar
         elif language == "fr":
@@ -178,27 +175,40 @@ def chat_endpoint():
         else:
             chain = rag_chain_en
 
-        # Simple history management
-        history_text = "\n".join(chat_history[-6:])
+        if chain is None:
+            logger.error("RAG chain is not available (check index or API key).")
+            return jsonify({
+                "reply": "System is not fully initialized (index or model issue). Please contact APQA."
+            }), 503
 
-        logger.info(f"Processing message ({language}): {message[:50]}...")
+        history_text = "\n".join(chat_history[-6:])
+        logger.info(f"Processing message [{language}]: {message[:80]}...")
+
         answer = chain({
             "input": message,
             "chat_history": history_text,
         })
-        
+
         chat_history.append(f"User: {message}")
         chat_history.append(f"Assistant: {answer}")
 
         return jsonify({"reply": answer})
 
     except Exception as e:
-        logger.error(f"❌ Error processing request: {e}", exc_info=True)
-        return jsonify({"reply": "Sorry, something went wrong. Please try again."}), 500
+        logger.error(f"❌ Error in /chat: {e}", exc_info=True)
+        # Frontend currently only looks at 'reply', so keep that key
+        return jsonify({
+            "reply": "Sorry, something went wrong. Please try again.",
+            "error": str(e)
+        }), 500
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"})
+    return jsonify({
+        "status": "ok",
+        "has_index": vector_index is not None,
+        "has_api_key": bool(GOOGLE_API_KEY),
+    })
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
