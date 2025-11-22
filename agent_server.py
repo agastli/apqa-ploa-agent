@@ -10,7 +10,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmb
 from langchain_community.vectorstores import FAISS
 
 from langchain_core.prompts import ChatPromptTemplate
-# ✅ FIX: Import from langchain_classic instead of langchain.chains
+# Import from langchain_classic instead of langchain.chains
 from langchain_classic.chains import create_retrieval_chain
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # Configuration & basic checks
 # -------------------------------------------------------------------
 
-# ✅ Use GOOGLE_API_KEY from environment variables
+# Use GOOGLE_API_KEY from environment variables
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 
 if not GOOGLE_API_KEY:
@@ -45,8 +45,15 @@ def load_vector_index():
     """Load the FAISS index built by build_index.py."""
     logger.info(f"Loading FAISS index from '{INDEX_DIR}' ...")
 
-    # Must match build_index.py
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+    if not GOOGLE_API_KEY:
+        logger.critical("Cannot load index: GOOGLE_API_KEY is not set!")
+        return None
+
+    # ✅ FIX: Explicitly pass the API key to avoid DefaultCredentialsError
+    embeddings = GoogleGenerativeAIEmbeddings(
+        model="models/text-embedding-004",
+        google_api_key=GOOGLE_API_KEY
+    )
 
     if not os.path.isdir(INDEX_DIR):
         logger.critical(f"Index directory '{INDEX_DIR}' not found!")
@@ -114,11 +121,12 @@ def build_rag_chain(config: RagConfig):
         logger.error("GOOGLE_API_KEY missing; cannot build LLM.")
         return None
 
-    # ✅ Use the model you requested
+    # ✅ FIX: Explicitly pass the API key to ChatGoogleGenerativeAI
     llm = ChatGoogleGenerativeAI(
         model="gemini-flash-latest",
         temperature=0.2,
         max_output_tokens=1024,
+        google_api_key=GOOGLE_API_KEY
     )
 
     system_prompt_text = get_system_prompt(config.language)
