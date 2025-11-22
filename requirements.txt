@@ -2,12 +2,12 @@ flask
 flask-cors
 gunicorn
 
-# LangChain ecosystem (v1)
-langchain==1.0.8
-langchain-community==0.4.1
-langchain-google-genai==3.1.0
-langchain-classic==1.0.0
+langchain==0.3.7
+langchain-core==0.3.12
+langchain-google-genai==1.0.3
+langchain-community==0.3.7
 
+google-ai-generativelanguage
 faiss-cpu
 pypdf
-pydantic>=2.0
+python-dotenv
