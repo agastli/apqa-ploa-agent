@@ -39,10 +39,19 @@ def setup_agent() -> None:
             print("⚠️ Error: 'faiss_index' folder not found!")
             return
 
-        vector_store = FAISS.load_local(
-            "faiss_index",
-            embeddings,
-            allow_dangerous_deserialization=True,
+        vector_store = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
+        
+        # ✅ FIX: Increase 'k' from 8 to 25. 
+        # This forces the agent to read 25 different sections of the manual before answering.
+        retriever = vector_store.as_retriever(search_kwargs={"k": 25})
+        
+        print("✅ Vector Index Loaded")
+
+        # ✅ FIX: Lower temperature to 0.0 to force exact quoting
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-flash-latest", 
+            temperature=0.0,
+            max_output_tokens=2000 # Allow long answers
         )
 
         # Increase k so the model sees more relevant context
