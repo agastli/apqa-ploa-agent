@@ -40,7 +40,7 @@ class RagConfig:
 
 def load_vector_index() -> FAISS:
     """Load the FAISS index built by build_index.py."""
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-001")
 
     if not os.path.isdir(INDEX_DIR):
         raise RuntimeError(
