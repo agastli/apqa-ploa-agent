@@ -1,5 +1,7 @@
 import os
-from flask import Flask, request, jsonify
+import uuid
+
+from flask import Flask, request, jsonify, session
 from flask_cors import CORS
 
 from langchain_google_genai import (
@@ -11,26 +13,40 @@ from langchain_classic.chains import create_retrieval_chain
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_community.vectorstores import FAISS
 
+from langchain_core.chat_history import InMemoryChatMessageHistory
+from langchain_core.runnables import RunnableWithMessageHistory
+
 # --- CONFIGURATION ---
-# Prefer setting GEMINI_API_KEY in the environment (Render / local)
 API_KEY = os.environ.get("GEMINI_API_KEY")
 if API_KEY:
     os.environ["GOOGLE_API_KEY"] = API_KEY
 
 app = Flask(__name__)
+# Needed for Flask session cookies
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "apqa-secret-key")
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 # --- GLOBAL VARIABLES ---
 rag_chain = None
+conversational_rag = None
+
+# Store chat history per session_id in server memory
+history_store: dict[str, InMemoryChatMessageHistory] = {}
+
+
+def get_session_history(session_id: str) -> InMemoryChatMessageHistory:
+    """Return (or create) the chat history for a given session."""
+    if session_id not in history_store:
+        history_store[session_id] = InMemoryChatMessageHistory()
+    return history_store[session_id]
 
 
 def setup_agent() -> None:
-    """Load FAISS index and build the RAG chain."""
-    global rag_chain
+    """Load FAISS index and build the RAG chain with conversation memory."""
+    global rag_chain, conversational_rag
     print("--- Loading Vector Index ---")
 
     try:
-        # 1. Load embeddings and FAISS index
         embeddings = GoogleGenerativeAIEmbeddings(
             model="models/text-embedding-004"
         )
@@ -45,69 +61,73 @@ def setup_agent() -> None:
             allow_dangerous_deserialization=True,
         )
 
-        # Show the model enough of the manuals to see full PLO lists, etc.
         retriever = vector_store.as_retriever(
-            search_kwargs={
-                "k": 12,  # tune between 10–15 as needed
-            }
+            search_kwargs={"k": 12}
         )
         print("✅ Vector Index Loaded")
 
-        # 2. Setup Gemini LLM
         llm = ChatGoogleGenerativeAI(
             model="gemini-flash-latest",
-            temperature=0.2,        # a bit more natural, still factual
+            temperature=0.2,
             max_output_tokens=1200,
         )
 
-        # 3. System prompt tuned for APQA-style answers (no “context says”)
+        # --- System prompt with history support ---
         system_prompt = (
             "You represent Qatar University's Office of Academic Planning & Quality Assurance (APQA). "
             "Answer questions the way a knowledgeable APQA staff member would respond to faculty or programs. "
             "Use clear, professional, and friendly language. Do not sound robotic.\n\n"
             "STYLE AND TONE\n"
-            "- Speak directly, as if you are part of APQA (e.g., \"Currently, the OAS supports...\"), "
-            "not as an AI system.\n"
-            "- Do NOT mention words like \"context\", \"documents\", \"manuals\", \"PDF\", or \"retrieved text\" "
-            "in your answer.\n"
+            "- Speak directly, as if you are part of APQA (e.g., \"Currently, the OAS supports...\").\n"
+            "- Do NOT mention words like \"context\", \"documents\", \"manuals\", or \"PDF\" in your answer.\n"
             "- Avoid phrases such as \"Based on the provided context\" or \"The context states\". "
             "Instead, state the information directly, as guidance from APQA.\n"
             "- When helpful, you may use short bullet points, but keep the explanation concise and human-sounding.\n\n"
             "POLICY AND GROUNDEDNESS\n"
             "- Your knowledge comes ONLY from the internal APQA manuals, rubrics, and guidelines provided below. "
-            "You must not invent new policies or procedures.\n"
-            "- Normal reasoning is allowed (for example, counting how many outcomes appear in a numbered list), "
-            "but you must not fabricate requirements that are not supported by the information you see.\n"
-            "- If something is clearly described, answer confidently in APQA's voice.\n"
-            "- If something is NOT described, be honest and say something like: "
+            "Do not invent new policies.\n"
+            "- Normal reasoning is allowed (e.g., counting the number of outcomes in a list).\n"
+            "- If something is NOT described, say: "
             "\"Our current APQA documents do not specify this point\" or "
             "\"This is not explicitly detailed in the available guidelines.\" "
-            "Then, if appropriate, you may offer a neutral, practical suggestion.\n\n"
-            "SPECIAL HANDLING FOR PEOs / PLOs / PERFORMANCE INDICATORS\n"
+            "You may then offer a neutral, practical suggestion.\n\n"
+            "SPECIAL HANDLING FOR PEOs / PLOs / STUDENT OUTCOMES / PIs\n"
             "- When the user asks about PEOs, PLOs, Student Outcomes (SOs), or Performance Indicators (PIs):\n"
-            "  * First, scan all the information you see for numbered lists or bullet lists that define them.\n"
-            "  * Count how many items are in the list and state the number explicitly (e.g., \"Engineering BS programs "
-            "have seven outcomes\").\n"
-            "  * List each outcome/indicator with its wording, as fully as it appears in the information you see.\n"
-            "  * If the list appears incomplete (for example, only items (1)–(3) are visible), say clearly that the "
-            "remaining items are not shown in the available text.\n"
-            "- If the documents show that all Engineering BS programs use the ABET Student Outcomes (1)–(7), you may "
-            "state that engineering programs have seven PLOs aligned with those outcomes.\n\n"
-            "Remember: respond as APQA, do not mention that you are an AI, and do not refer to \"context\" in your replies.\n\n"
+            "  * Look for numbered or bullet lists that define them.\n"
+            "  * State explicitly how many there are (e.g., \"Engineering BS programs have seven outcomes\").\n"
+            "  * List each item with its wording, as fully as it appears in the information you see.\n"
+            "  * If the list appears incomplete, say that the remaining items do not appear in the available text.\n"
+            "- If the documents show that all Engineering BS programs use the ABET Student Outcomes (1)–(7), "
+            "you may state that engineering programs have seven PLOs aligned with those outcomes.\n\n"
+            "Remember: respond as APQA, do not mention that you are an AI, and do not refer to \"context\" "
+            "in your replies.\n\n"
             "APQA reference information:\n"
             "{context}"
         )
 
+        # IMPORTANT: include {history} so previous turns are visible to the model
+        from langchain_core.prompts import MessagesPlaceholder
+
         prompt = ChatPromptTemplate.from_messages(
             [
                 ("system", system_prompt),
+                MessagesPlaceholder(variable_name="history"),
                 ("human", "{input}"),
             ]
         )
 
-        # 4. Build the RAG chain
-        question_answer_chain = create_stuff_documents_chain(llm, prompt)
-        rag_chain = create_retrieval_chain(retriever, question_answer_chain)
+
+        qa_chain = create_stuff_documents_chain(llm, prompt)
+        rag_chain = create_retrieval_chain(retriever, qa_chain)
+
+        # Wrap with conversation memory
+        conversational_rag = RunnableWithMessageHistory(
+            rag_chain,
+            get_session_history,
+            input_messages_key="input",
+            history_messages_key="history",
+            output_messages_key="answer",
+        )
 
         print("--- Agent Ready ---")
 
@@ -115,7 +135,7 @@ def setup_agent() -> None:
         print(f"CRITICAL ERROR IN setup_agent: {e}")
 
 
-# Initialize the agent at startup
+# Initialize at startup
 setup_agent()
 
 
@@ -126,19 +146,26 @@ def home():
 
 @app.route("/chat", methods=["POST"])
 def chat_endpoint():
+    global conversational_rag
     data = request.json or {}
     user_message = data.get("message")
 
     if not user_message:
         return jsonify({"error": "No message"}), 400
 
-    if not rag_chain:
-        # Index or chain failed to initialize
+    if conversational_rag is None:
         return jsonify({"error": "Agent is starting..."}), 503
 
+    # Ensure each browser gets a stable session_id via Flask cookies
+    if "session_id" not in session:
+        session["session_id"] = str(uuid.uuid4())
+    session_id = session["session_id"]
+
     try:
-        response = rag_chain.invoke({"input": user_message})
-        # The retrieval chain returns a dict with an 'answer' key
+        response = conversational_rag.invoke(
+            {"input": user_message},
+            config={"configurable": {"session_id": session_id}},
+        )
         return jsonify({"reply": response.get("answer", "")})
     except Exception as e:
         print(f"Error while handling /chat: {e}")
@@ -146,5 +173,4 @@ def chat_endpoint():
 
 
 if __name__ == "__main__":
-    # Local debugging only; Render will use gunicorn
     app.run(host="0.0.0.0", port=10000)
