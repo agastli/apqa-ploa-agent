@@ -141,7 +141,7 @@ def build_rag_chain(config: RagConfig):
     """Create a RAG chain for a given language."""
 
     llm = ChatGoogleGenerativeAI(
-        model="gemini-1.5-pro",
+        model="gemini-flash-latest",
         temperature=0.2,
         max_output_tokens=1024,
     )
