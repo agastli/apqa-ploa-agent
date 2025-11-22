@@ -24,7 +24,7 @@ if not GEMINI_API_KEY:
         "Please set GEMINI_API_KEY in your environment before running agent_server.py"
     )
 
-INDEX_DIR = os.environ.get("INDEX_DIR", "apqa_faiss_index")
+INDEX_DIR = os.environ.get("INDEX_DIR", "faiss_index")
 
 os.environ["GOOGLE_API_KEY"] = GEMINI_API_KEY
 
