@@ -3,7 +3,7 @@ import logging
 from dataclasses import dataclass
 from typing import Dict, Any, List
 
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
@@ -49,7 +49,7 @@ def load_vector_index():
         logger.critical("Cannot load index: GOOGLE_API_KEY is not set!")
         return None
 
-    # ✅ FIX: Explicitly pass the API key to avoid DefaultCredentialsError
+    # Explicitly pass the API key to avoid DefaultCredentialsError
     embeddings = GoogleGenerativeAIEmbeddings(
         model="models/text-embedding-004",
         google_api_key=GOOGLE_API_KEY
@@ -121,7 +121,7 @@ def build_rag_chain(config: RagConfig):
         logger.error("GOOGLE_API_KEY missing; cannot build LLM.")
         return None
 
-    # ✅ FIX: Explicitly pass the API key to ChatGoogleGenerativeAI
+    # Explicitly pass the API key to ChatGoogleGenerativeAI
     llm = ChatGoogleGenerativeAI(
         model="gemini-flash-latest",
         temperature=0.2,
@@ -154,19 +154,33 @@ rag_chain_ar = build_rag_chain(RagConfig(language="ar"))
 rag_chain_fr = build_rag_chain(RagConfig(language="fr"))
 
 # -------------------------------------------------------------------
-# Flask app
+# Flask app - API ONLY (no template rendering)
 # -------------------------------------------------------------------
 
-app = Flask(__name__, template_folder="templates", static_folder="static")
-# In production, you should restrict this to your frontend's domain
-# For example: CORS(app, origins=["https://your-frontend-domain.com"])
-CORS(app)
+app = Flask(__name__)
+
+# ✅ CORS Configuration - Allow requests from your frontend domain
+CORS(app, origins=[
+    "https://apqa.gastli.org",
+    "http://apqa.gastli.org",
+    "https://www.apqa.gastli.org",
+    "http://www.apqa.gastli.org"
+])
 
 chat_history: List[str] = []
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    """Simple API status endpoint"""
+    return jsonify({
+        "status": "ok",
+        "message": "APQA Assessment Assistant API",
+        "version": "1.0",
+        "endpoints": {
+            "health": "/health",
+            "chat": "/chat (POST)"
+        }
+    })
 
 @app.route("/chat", methods=["POST"])
 def chat_endpoint():
@@ -207,7 +221,6 @@ def chat_endpoint():
 
     except Exception as e:
         logger.error(f"❌ Error in /chat: {e}", exc_info=True)
-        # Frontend currently only looks at 'reply', so keep that key
         return jsonify({
             "reply": "Sorry, something went wrong. Please try again.",
             "error": str(e)
@@ -219,6 +232,11 @@ def health():
         "status": "ok",
         "has_index": vector_index is not None,
         "has_api_key": bool(GOOGLE_API_KEY),
+        "chains_ready": {
+            "en": rag_chain_en is not None,
+            "ar": rag_chain_ar is not None,
+            "fr": rag_chain_fr is not None
+        }
     })
 
 if __name__ == "__main__":
