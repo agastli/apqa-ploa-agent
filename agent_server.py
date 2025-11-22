@@ -1,185 +1,261 @@
 import os
-import uuid
+from dataclasses import dataclass
+from typing import Dict, Any, List
+from operator import itemgetter
 
-from flask import Flask, request, jsonify, session
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-from langchain_google_genai import (
-    ChatGoogleGenerativeAI,
-    GoogleGenerativeAIEmbeddings,
-)
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_classic.chains import create_retrieval_chain
-from langchain_classic.chains.combine_documents import create_stuff_documents_chain
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_community.vectorstores import FAISS
 
-from langchain_core.chat_history import InMemoryChatMessageHistory
-from langchain_core.runnables import RunnableWithMessageHistory
-
-# --- CONFIGURATION ---
-API_KEY = os.environ.get("GEMINI_API_KEY")
-if API_KEY:
-    os.environ["GOOGLE_API_KEY"] = API_KEY
-
-app = Flask(__name__)
-# Needed for Flask session cookies
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "apqa-secret-key")
-CORS(app, resources={r"/*": {"origins": "*"}})
-
-# --- GLOBAL VARIABLES ---
-rag_chain = None
-conversational_rag = None
-
-# Store chat history per session_id in server memory
-history_store: dict[str, InMemoryChatMessageHistory] = {}
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnableParallel, RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
 
 
-def get_session_history(session_id: str) -> InMemoryChatMessageHistory:
-    """Return (or create) the chat history for a given session."""
-    if session_id not in history_store:
-        history_store[session_id] = InMemoryChatMessageHistory()
-    return history_store[session_id]
+# -------------------------------------------------------------------
+# Configuration & basic checks
+# -------------------------------------------------------------------
+
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    raise RuntimeError(
+        "Please set GEMINI_API_KEY in your environment before running agent_server.py"
+    )
+
+INDEX_DIR = os.environ.get("INDEX_DIR", "apqa_faiss_index")
+
+os.environ["GOOGLE_API_KEY"] = GEMINI_API_KEY
 
 
-def setup_agent() -> None:
-    """Load FAISS index and build the RAG chain with conversation memory and language control."""
-    global rag_chain, conversational_rag
-    print("--- Loading Vector Index ---")
+@dataclass
+class RagConfig:
+    language: str = "en"  # "en", "ar", or "fr"
 
-    try:
-        embeddings = GoogleGenerativeAIEmbeddings(
-            model="models/text-embedding-004"
+
+# -------------------------------------------------------------------
+# Load FAISS index
+# -------------------------------------------------------------------
+
+def load_vector_index() -> FAISS:
+    """Load the FAISS index built by build_index.py."""
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+
+    if not os.path.isdir(INDEX_DIR):
+        raise RuntimeError(
+            f"Index directory '{INDEX_DIR}' not found. "
+            "Run build_index.py locally first to create the FAISS index."
         )
 
-        if not os.path.exists("faiss_index"):
-            print("⚠️ Error: 'faiss_index' folder not found!")
-            return
+    index = FAISS.load_local(
+        INDEX_DIR,
+        embeddings,
+        index_name="apqa_index",
+        allow_dangerous_deserialization=True,
+    )
+    return index
 
-        vector_store = FAISS.load_local(
-            "faiss_index",
-            embeddings,
-            allow_dangerous_deserialization=True,
+
+vector_index = load_vector_index()
+retriever = vector_index.as_retriever(search_kwargs={"k": 6})
+
+
+# -------------------------------------------------------------------
+# Helper: system prompts per language
+# -------------------------------------------------------------------
+
+def get_system_prompt(language: str) -> str:
+    """Return a friendly APQA-style system prompt in the requested language."""
+    if language == "ar":
+        return (
+            "أنت مساعد مكتب التخطيط والجودة الأكاديمية بجامعة قطر.\n"
+            "دورك هو مساعدة الزملاء في برامج الكليات على فهم وتطبيق:\n"
+            "• مخرجات التعلم البرنامجية PLOs\n"
+            "• أدوات التقييم (مثل rubrics)\n"
+            "• نظام التقييم الإلكتروني OAS\n\n"
+            "اعتمد أولاً على الوثائق المتاحة في سياقك (الملفات التي تم تغذيتك بها).\n"
+            "إن لم تجد إجابة واضحة في الوثائق، وضّح ذلك بصراحة، "
+            "وقدّم شرحاً عاماً مبسطاً استناداً إلى أفضل الممارسات في الجودة والاعتماد.\n\n"
+            "اكتب بأسلوب مهني ولطيف كأنك موظف من مكتب APQA يجيب عن استفسار زميل.\n"
+            "إذا احتاج الأمر إلى تنبيه أو توضيح رسمي، استخدم عبارات مثل:\n"
+            "«في مكتب التخطيط والجودة الأكاديمية يتم عادةً…» أو «حسب الممارسات المعتمدة في الجامعة…».\n\n"
+            "السياق التالي يحتوي على المقتطفات ذات الصلة من الوثائق:\n"
+            "{context}\n\n"
+            "تاريخ المحادثة السابقة بين المستخدم والمساعد:\n"
+            "{chat_history}\n\n"
+            "سؤال الزميل:\n"
+            "{input}\n"
+            "قدّم إجابة واضحة ومنظمة، مع نقاط مرقمة إن لزم الأمر."
         )
 
-        retriever = vector_store.as_retriever(
-            search_kwargs={"k": 12}
-        )
-        print("✅ Vector Index Loaded")
-
-        llm = ChatGoogleGenerativeAI(
-            model="gemini-flash-latest",
-            temperature=0.2,
-            max_output_tokens=1200,
-        )
-
-        # --- System prompt with history + language support ---
-        system_prompt = (
-            "You represent Qatar University's Office of Academic Planning & Quality Assurance (APQA). "
-            "Answer questions the way a knowledgeable APQA staff member would respond to faculty or programs. "
-            "Use clear, professional, and friendly language. Do not sound robotic.\n\n"
-            "LANGUAGE CONTROL\n"
-            "- You receive a parameter called 'language'.\n"
-            "- If language == 'ar', answer fully in Modern Standard Arabic.\n"
-            "- If language == 'en', answer fully in English.\n"
-            "- Do not mix languages unless the user explicitly asks you to.\n\n"
-            "STYLE AND TONE\n"
-            "- Speak directly, as if you are part of APQA (e.g., \"Currently, the OAS supports...\").\n"
-            "- Do NOT mention words like \"context\", \"documents\", \"manuals\", or \"PDF\" in your answer.\n"
-            "- Avoid phrases such as \"Based on the provided context\" or \"The context states\". "
-            "Instead, state the information directly, as guidance from APQA.\n"
-            "- When helpful, you may use short bullet points, but keep the explanation concise and human-sounding.\n\n"
-            "POLICY AND GROUNDEDNESS\n"
-            "- Your knowledge comes ONLY from the internal APQA manuals, rubrics, and guidelines provided below. "
-            "Do not invent new policies.\n"
-            "- Normal reasoning is allowed (e.g., counting the number of outcomes in a list).\n"
-            "- If something is NOT described, say: "
-            "\"Our current APQA documents do not specify this point\" or "
-            "\"This is not explicitly detailed in the available guidelines.\" "
-            "You may then offer a neutral, practical suggestion.\n\n"
-            "SPECIAL HANDLING FOR PEOs / PLOs / STUDENT OUTCOMES / PIs\n"
-            "- When the user asks about PEOs, PLOs, Student Outcomes (SOs), or Performance Indicators (PIs):\n"
-            "  * Look for numbered or bullet lists that define them.\n"
-            "  * State explicitly how many there are (e.g., \"Engineering BS programs have seven outcomes\").\n"
-            "  * List each item with its wording, as fully as it appears in the information you see.\n"
-            "  * If the list appears incomplete, say that the remaining items do not appear in the available text.\n"
-            "- If the documents show that all Engineering BS programs use the ABET Student Outcomes (1)–(7), "
-            "you may state that engineering programs have seven PLOs aligned with those outcomes.\n\n"
-            "Remember: respond as APQA, do not mention that you are an AI, and do not refer to \"context\" "
-            "in your replies.\n\n"
-            "APQA reference information:\n"
-            "{context}"
+    elif language == "fr":
+        return (
+            "Vous êtes l’assistant du Bureau de la planification et de l’assurance qualité académique "
+            "de l’Université du Qatar.\n"
+            "Votre rôle est d’aider les collègues à comprendre et appliquer :\n"
+            "• les PLO (Program Learning Outcomes)\n"
+            "• les outils d’évaluation (rubrics, etc.)\n"
+            "• le système d’évaluation en ligne (OAS).\n\n"
+            "Appuyez-vous d’abord sur les documents fournis dans le contexte.\n"
+            "Si l’information n’est pas disponible, dites-le clairement et proposez une explication générale "
+            "basée sur les bonnes pratiques en assurance qualité.\n\n"
+            "Répondez dans un style professionnel mais convivial, comme un collègue du bureau APQA.\n\n"
+            "Contexte documentaire :\n"
+            "{context}\n\n"
+            "Historique de la conversation :\n"
+            "{chat_history}\n\n"
+            "Question de l’utilisateur :\n"
+            "{input}\n"
+            "Donnez une réponse structurée et précise."
         )
 
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                ("system", system_prompt),
-                MessagesPlaceholder(variable_name="history"),
-                (
-                    "human",
-                    "Language: {language}\n\n"
-                    "User question: {input}"
-                ),
-            ]
+    # Default: English
+    return (
+        "You are the assistant of the Office of Academic Planning & Quality Assurance (APQA) at Qatar University.\n"
+        "Your role is to help colleagues understand and apply:\n"
+        "• Program Learning Outcomes (PLOs)\n"
+        "• Assessment tools (rubrics, performance indicators)\n"
+        "• The Online Assessment System (OAS) and related procedures.\n\n"
+        "Always rely first on the official assessment documents provided in the context. "
+        "If the documents do not contain a direct answer, say this explicitly and then provide a general explanation "
+        "based on good practices in academic quality and accreditation.\n\n"
+        "Write in a friendly, collegial tone as if you are an APQA staff member answering a colleague’s question. "
+        "Avoid robotic phrasing such as ‘the context states’. Instead, use phrases like "
+        "‘In APQA, we usually…’ or ‘According to the current assessment guidelines…’ when appropriate.\n\n"
+        "Relevant document excerpts:\n"
+        "{context}\n\n"
+        "Conversation so far:\n"
+        "{chat_history}\n\n"
+        "User question:\n"
+        "{input}\n"
+        "Provide a clear, organized answer. Use bullet points where helpful."
+    )
+
+
+# -------------------------------------------------------------------
+# Build RAG chain using LangChain 1.x runnables (no langchain.chains)
+# -------------------------------------------------------------------
+
+def build_rag_chain(config: RagConfig):
+    """Create a RAG chain for a given language."""
+
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-1.5-pro",
+        temperature=0.2,
+        max_output_tokens=1024,
+    )
+
+    # Prompt template uses {context}, {chat_history}, {input}
+    system_prompt = get_system_prompt(config.language)
+    prompt = ChatPromptTemplate.from_template(system_prompt)
+
+    def format_docs(docs):
+        return "\n\n".join(doc.page_content for doc in docs)
+
+    # Runnable pipeline:
+    # 1. Use retriever to get docs and format them as context
+    # 2. Pass context + input (+ chat_history) to the prompt
+    # 3. Generate with LLM
+    # 4. Parse to plain string
+    rag_runnable = (
+        RunnableParallel(
+            {
+                "context": retriever | (lambda docs: format_docs(docs)),
+                "input": itemgetter("input"),
+                "chat_history": itemgetter("chat_history"),
+            }
+        )
+        | prompt
+        | llm
+        | StrOutputParser()
+    )
+
+    # Wrap into a callable that matches our older interface
+    def chain(inputs: Dict[str, Any]) -> str:
+        return rag_runnable.invoke(
+            {
+                "input": inputs["input"],
+                "chat_history": inputs.get("chat_history", ""),
+            }
         )
 
-        qa_chain = create_stuff_documents_chain(llm, prompt)
-        rag_chain = create_retrieval_chain(retriever, qa_chain)
-
-        # Wrap with conversation memory
-        conversational_rag = RunnableWithMessageHistory(
-            rag_chain,
-            get_session_history,
-            input_messages_key="input",
-            history_messages_key="history",
-            output_messages_key="answer",
-        )
-
-        print("--- Agent Ready ---")
-
-    except Exception as e:
-        print(f"CRITICAL ERROR IN setup_agent: {e}")
+    return chain
 
 
-# Initialize at startup
-setup_agent()
+# Create one chain per language
+rag_chain_en = build_rag_chain(RagConfig(language="en"))
+rag_chain_ar = build_rag_chain(RagConfig(language="ar"))
+rag_chain_fr = build_rag_chain(RagConfig(language="fr"))
+
+
+# -------------------------------------------------------------------
+# Flask app & in-memory chat history
+# -------------------------------------------------------------------
+
+app = Flask(__name__, static_folder=".", static_url_path="")
+CORS(app)
+
+# Very simple global history (sufficient for your single-user deployment)
+chat_history: List[str] = []
 
 
 @app.route("/")
-def home():
-    return "APQA Agent is Live!"
+def index() -> Any:
+    """Serve the main HTML page."""
+    return app.send_static_file("index.html")
 
 
 @app.route("/chat", methods=["POST"])
 def chat_endpoint():
-    global conversational_rag
-    data = request.json or {}
-    user_message = data.get("message")
-    language = data.get("language", "en")
+    """
+    POST /chat
+    body: { "message": "...", "language": "en" | "ar" | "fr" }
+    """
+    data = request.get_json(force=True)
+    message = (data.get("message") or "").strip()
+    language = (data.get("language") or "en").lower()
 
-    if not user_message:
-        return jsonify({"error": "No message"}), 400
+    if not message:
+        return jsonify({"error": "Message is required"}), 400
 
-    if conversational_rag is None:
-        return jsonify({"error": "Agent is starting..."}), 503
+    # Choose chain based on language
+    if language == "ar":
+        chain = rag_chain_ar
+    elif language == "fr":
+        chain = rag_chain_fr
+    else:
+        chain = rag_chain_en
 
-    # Ensure each browser gets a stable session_id via Flask cookies
-    if "session_id" not in session:
-        session["session_id"] = str(uuid.uuid4())
-    session_id = session["session_id"]
+    # Build a simple textual chat history (last 10 turns)
+    history_text = "\n".join(chat_history[-10:])
 
     try:
-        response = conversational_rag.invoke(
+        answer = chain(
             {
-                "input": user_message,
-                "language": language,
-            },
-            config={"configurable": {"session_id": session_id}},
+                "input": message,
+                "chat_history": history_text,
+            }
         )
-        return jsonify({"reply": response.get("answer", "")})
     except Exception as e:
-        print(f"Error while handling /chat: {e}")
-        return jsonify({"error": str(e)}), 500
+        # In production you may want to log this error
+        answer = (
+            "Sorry, something went wrong while generating the answer. "
+            "Please try again or contact APQA for assistance."
+        )
+
+    # Update in-memory history
+    chat_history.append(f"User: {message}")
+    chat_history.append(f"Assistant: {answer}")
+
+    return jsonify({"reply": answer})
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"})
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
