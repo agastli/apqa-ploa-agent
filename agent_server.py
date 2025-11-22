@@ -5,8 +5,9 @@ from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmb
 from langchain_core.prompts import ChatPromptTemplate
 
 # ✅ FIXED IMPORTS (Standardized for v0.2.16)
-from langchain.chains import create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_classic.chains import create_retrieval_chain
+from langchain_classic.chains.combine_documents import create_stuff_documents_chain
+
 from langchain_community.vectorstores import FAISS
 
 # ... (Rest of code is same)
