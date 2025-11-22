@@ -3,10 +3,13 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
-# ✅ STANDARD IMPORTS (Safe)
-from langchain.chains import create_retrieval_chain
+
+# ✅ SAFER IMPORTS (Points to specific files)
+from langchain.chains.retrieval import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_community.vectorstores import FAISS
+
+# ... (Rest of the code remains exactly the same)
 
 
 # --- CONFIGURATION ---
