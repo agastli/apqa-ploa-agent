@@ -83,45 +83,69 @@ else:
 # -------------------------------------------------------------------
 
 def get_system_prompt(language: str) -> str:
-    system_prompt = (
-        "You represent Qatar University's Office of Academic Planning & Quality Assurance (APQA). "
-        "Answer questions the way a knowledgeable APQA staff member would respond to faculty or programs. "
-        "Use clear, professional, and friendly language. Do not sound robotic.\n\n"
-        "LANGUAGE CONTROL\n"
-        "- You receive a parameter called 'language'.\n"
-        "- If language == 'ar', answer fully in Modern Standard Arabic.\n"
-        "- If language == 'en', answer fully in English.\n"
-        "- Do not mix languages unless the user explicitly asks you to.\n\n"
-        "STYLE AND TONE\n"
-        "- Speak directly, as if you are part of APQA (e.g., \"Currently, the OAS supports...\").\n"
-        "- Do NOT mention words like \"context\", \"documents\", \"manuals\", or \"PDF\" in your answer.\n"
-        "- Avoid phrases such as \"Based on the provided context\" or \"The context states\". "
-        "Instead, state the information directly, as guidance from APQA.\n"
-        "- When helpful, you may use short bullet points, but keep the explanation concise and human-sounding.\n\n"
-        "POLICY AND GROUNDEDNESS\n"
-        "- Your knowledge comes ONLY from the internal APQA manuals, rubrics, and guidelines provided below.\n"
-        "- When information is found in the reference materials, explain it fully and comprehensively.\n"
-        "- ONLY if something is truly NOT described in the reference information, say: "
-        "\"Our current APQA documents do not specify this point\" or "
-        "\"This is not explicitly detailed in the available guidelines.\" "
-        "You may then offer a neutral, practical suggestion.\n"
-        "- Do not invent new policies.\n"
-        "- Normal reasoning is allowed (e.g., counting the number of outcomes in a list).\n\n"
-        "SPECIAL HANDLING FOR PEOs / PLOs / STUDENT OUTCOMES / PIs\n"
-        "- When the user asks about PEOs, PLOs, Student Outcomes (SOs), or Performance Indicators (PIs):\n"
-        "  * Look for numbered or bullet lists that define them.\n"
-        "  * State explicitly how many there are (e.g., \"Engineering BS programs have seven outcomes\").\n"
-        "  * List each item with its wording, as fully as it appears in the information you see.\n"
-        "  * If the list appears incomplete, say that the remaining items do not appear in the available text.\n"
-        "- If the documents show that all Engineering BS programs use the ABET Student Outcomes (1)–(7), "
-        "you may state that engineering programs have seven PLOs aligned with those outcomes.\n\n"
-        "Remember: respond as APQA, do not mention that you are an AI, and do not refer to \"context\" "
-        "in your replies.\n\n"
-        "APQA reference information:\n"
-        "{context}"
+    # Map language codes to full language names
+    lang_map = {
+        "ar": "Arabic",
+        "fr": "French",
+        "en": "English"
+    }
+    lang_name = lang_map.get(language, "English")
+    
+    return (
+        f"You are a staff member at Qatar University's Office of Academic Planning & Quality Assurance (APQA). "
+        f"You help faculty and academic programs with their assessment and quality assurance questions.\n\n"
+        f"LANGUAGE INSTRUCTION:\n"
+        f"- The user is asking in {lang_name}\n"
+        f"- You MUST respond entirely in {lang_name}\n"
+        f"- Do not mix languages in your response\n\n"
+        f"IMPORTANT:\n"
+        f"- Use the reference information below to answer questions\n"
+        f"- If you find relevant information in the references, explain it fully and in detail\n"
+        f"- ONLY if you find NO relevant information at all, say: \"This point is not specified in our current guidelines\"\n\n"
+        f"Response Style:\n"
+        f"- Speak naturally and directly as an APQA staff member, use \"we\" or \"the office\" or \"at Qatar University\"\n"
+        f"- NEVER mention words like \"context\", \"documents\", \"provided information\", or \"manuals\"\n"
+        f"- Answer directly as if explaining from your office experience\n"
+        f"- Avoid repetition and robotic phrases\n"
+        f"- Be friendly and professional, but natural in tone\n"
+        f"- Provide comprehensive and helpful answers\n\n"
+        f"Reference Information:\n{{context}}\n\n"
+        f"Chat History:\n{{chat_history}}\n\n"
+        f"Question:\n{{input}}"
     )
-    return system_prompt
 
+# -------------------------------------------------------------------
+# Query Translation Helper
+# -------------------------------------------------------------------
+
+def translate_query_to_english(query: str, source_language: str) -> str:
+    """
+    Translate non-English queries to English for better RAG retrieval.
+    Uses Gemini to translate the query.
+    """
+    if source_language == "en":
+        return query
+    
+    try:
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-flash-latest",
+            temperature=0.0,
+            google_api_key=GOOGLE_API_KEY
+        )
+        
+        translation_prompt = (
+            f"Translate the following {source_language} text to English. "
+            f"Only return the translation, nothing else.\n\n"
+            f"Text: {query}"
+        )
+        
+        response = llm.invoke(translation_prompt)
+        translated = response.content.strip()
+        logger.info(f"Translated query [{source_language}→en]: {query[:50]}... → {translated[:50]}...")
+        return translated
+    except Exception as e:
+        logger.warning(f"Translation failed, using original query: {e}")
+        return query
 
 # -------------------------------------------------------------------
 # Build RAG chain
@@ -224,8 +248,12 @@ def chat_endpoint():
         history_text = "\n".join(chat_history[-6:])
         logger.info(f"Processing message [{language}]: {message[:80]}...")
 
+        # Translate query to English for better retrieval
+        translated_query = translate_query_to_english(message, language)
+        
+        # Use translated query for retrieval, but original language for response
         answer = chain({
-            "input": message,
+            "input": translated_query,
             "chat_history": history_text,
         })
 
