@@ -125,7 +125,7 @@ def build_rag_chain(config: RagConfig):
     llm = ChatGoogleGenerativeAI(
         model="gemini-flash-latest",
         temperature=0.2,
-        max_output_tokens=1024,
+        max_output_tokens=4096,
         google_api_key=GOOGLE_API_KEY
     )
 
