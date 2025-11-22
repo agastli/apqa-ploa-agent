@@ -51,7 +51,7 @@ def load_vector_index() -> FAISS:
     index = FAISS.load_local(
         INDEX_DIR,
         embeddings,
-        index_name="apqa_index",
+        index_name="index",
         allow_dangerous_deserialization=True,
     )
     return index
